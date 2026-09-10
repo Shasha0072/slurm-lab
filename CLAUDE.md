@@ -27,7 +27,7 @@ explanations.
 - AWS free account plan, region ap-south-1, credit-limited.
   Instances get stopped after every session.
 - Cluster: ctl (slurmctld + slurmdbd + MariaDB), node1, node2
-- EC2 nodes run Ubuntu 24.04. Slurm built from source to /opt/slurm,
+- EC2 nodes run Rocky Linux 9 (RHEL-family). Slurm built from source to /opt/slurm,
   shared over NFS.
 
 ## Conventions
