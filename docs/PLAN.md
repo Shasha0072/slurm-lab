@@ -46,7 +46,7 @@
 **Goal:** Make the account safe and predictable before anything else exists. On the Free account plan you can't be billed, but credits deplete and the plan ends at 6 months or credit exhaustion — whichever comes first. Protect the runway.
 
 ### Steps
-1. Billing console → check plan type, credit balance, and expiry date. Write them here: `Plan: ____  Credits: ____  Expires: ____`
+1. Billing console → check plan type, credit balance, and expiry date. Write them here: `Plan: Free  Credits: $120  Expires: ~March 2027 (182 days from 2026-09-10)`
 2. Create an AWS Budget at $5 with an email alert. (This is also one of the onboarding activities that earns credits.)
 3. Complete the other onboarding activities to earn up to $100 more.
 4. Create an IAM user with admin rights and **stop using the root account.** Enable MFA on root.
