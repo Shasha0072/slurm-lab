@@ -3,7 +3,7 @@
 **Owner:** Shashwat
 **Goal:** Go from "I integrate with Slurm" to "I can explain, tune, operate, and extend Slurm" — plus real AWS infrastructure fluency. Target: credible depth in AI-infra interviews and technical discussions.
 **Started:** _(fill in)_
-**Environment:** AWS Free account plan, 4 × t3.micro-class instances
+**Environment:** AWS Free account plan, 3–4 × t3.micro-class instances, **Rocky Linux 9** (RHEL-compatible — what real HPC clusters run)
 
 ---
 
@@ -74,7 +74,8 @@ Not one on its own — but "I ran my lab on a hard credit budget and automated t
 **Goal:** Understand the EC2 primitives you'll be automating later. Don't skip to four instances; get one right first.
 
 ### Steps
-1. Launch one Ubuntu 24.04 t3.micro. During launch, read every screen instead of clicking Next: AMI, instance type, key pair, network settings, storage.
+1. Launch one **Rocky Linux 9** t3.micro. During launch, read every screen instead of clicking Next: AMI, instance type, key pair, network settings, storage.
+   - Rocky AMIs come via AWS Marketplace; if the Free plan blocks the subscription, search Community AMIs for Rocky-9, or fall back to Amazon Linux 2023 (also RHEL-derived and `dnf`-based).
 2. Note what got created *implicitly*: a VPC, subnet, route table, internet gateway, security group. Find each in the console. You cannot reason about Slurm networking later without this.
 3. SSH in. Explore: `lsblk`, `free -h`, `nproc`, `cat /etc/os-release`, `curl http://169.254.169.254/latest/meta-data/` (instance metadata — useful later for cloud-init scripts).
 4. Install something, create a file, then **stop** the instance (not terminate). Start it again. Note what changed: the public IP, and the private DNS name.
@@ -85,7 +86,8 @@ Not one on its own — but "I ran my lab on a hard credit budget and automated t
 ### Problems you WILL hit
 - **SSH connection refused / timed out.** Almost always the security group has no inbound rule for port 22 from your IP, or you're on a subnet with no internet gateway route. Learn to distinguish "refused" (something answered, nothing listening) from "timed out" (packets dropped — firewall/SG/routing).
 - **Public IP changed after stop/start.** Elastic IPs exist for this, but the better lesson: never hardcode IPs. This becomes critical in `slurm.conf`.
-- **Wrong username.** Ubuntu AMIs use `ubuntu`, Amazon Linux uses `ec2-user`. `Permission denied (publickey)` often just means the wrong username.
+- **Wrong username.** Rocky AMIs use `rocky`, Amazon Linux uses `ec2-user`, Ubuntu uses `ubuntu`. `Permission denied (publickey)` often just means the wrong username.
+- **`dnf` not `apt`.** Different package names throughout. Enable EPEL and CRB early: `sudo dnf install -y epel-release && sudo dnf config-manager --set-enabled crb`. Most "package not found" errors on RHEL-family are a missing repo, not a missing package.
 - **Instance stuck in "pending" or fails status checks.** Read the system log in the console; usually a bad user-data script.
 - **User-data ran but nothing happened.** Check `/var/log/cloud-init-output.log`. Silent failure is the default; that log is where the truth lives.
 
@@ -121,6 +123,8 @@ Not one on its own — but "I ran my lab on a hard credit budget and automated t
 - **UID mismatch.** Jobs run as the wrong user, or files land with numeric owners. The reason production clusters use LDAP/SSSD. Cause this deliberately once: change a UID on one node and watch what breaks.
 - **NFS mount hangs on boot.** `_netdev` and mount options matter; a hard NFS mount to a dead server hangs the machine. Learn `soft` vs `hard`.
 - **Hostname resets after reboot** (cloud-init overwrites it) — hence step 3.
+- **firewalld blocks everything.** Rocky ships firewalld enabled. Slurm needs 6817 (slurmctld), 6818 (slurmd), 6819 (slurmdbd), plus NFS and MySQL. Either add the ports properly (`firewall-cmd --permanent --add-port=6817/tcp`) or put the cluster interfaces in the `trusted` zone. Do NOT just `systemctl stop firewalld` — configuring it is the skill.
+- **SELinux denies NFS home directories.** `setsebool -P use_nfs_home_dirs on`. When something fails inexplicably on RHEL-family, check `ausearch -m avc -ts recent` BEFORE blaming Slurm. Learning to read AVC denials is a genuine differentiator — most engineers just run `setenforce 0` and move on.
 
 ### Exit criteria
 - [ ] `munge -n | ssh node1 unmunge` succeeds from every node to every node
@@ -138,11 +142,18 @@ Not one on its own — but "I ran my lab on a hard credit budget and automated t
 **Goal:** Compile it yourself, configure it minimally, and run a job across two nodes.
 
 ### Steps
-1. On `ctl`, install build deps: `build-essential libmunge-dev libmariadb-dev libpam0g-dev libjson-c-dev libhttp-parser-dev libyaml-dev libjwt-dev python3`.
+1. On `ctl`, install build deps:
+   ```bash
+   sudo dnf groupinstall -y "Development Tools"
+   sudo dnf install -y munge-devel mariadb-devel pam-devel json-c-devel \
+     http-parser-devel libyaml-devel libjwt-devel python3 rpm-build
+   ```
+   (EPEL + CRB must be enabled first — see Phase 1.)
 2. Download the latest Slurm tarball from SchedMD, extract.
 3. `./configure --prefix=/opt/slurm --sysconfdir=/etc/slurm --with-munge --enable-pam --with-jwt`
 4. **Read the configure summary output carefully.** It lists which optional plugins were found and which were skipped. This is a map of Slurm's capability surface — screenshot it and go look up three things you don't recognize.
 5. `make -j$(nproc) && sudo make install`. Since `/opt/slurm` is NFS-shared, the nodes get it for free.
+   - **Do this once as an RPM build too:** `rpmbuild -ta slurm-*.tar.bz2`. That's how production RHEL clusters actually deploy Slurm, and produced RPMs are a better artifact than a source install. Worth mentioning in interviews.
 6. Write a minimal `slurm.conf` (see appendix) and a minimal `cgroup.conf`. Same file on every node.
 7. Create spool/log/state directories owned by `slurm`, with correct permissions.
 8. Install systemd unit files from the source tree's `etc/` directory. Enable and start `slurmctld` on ctl, `slurmd` on nodes.
@@ -270,7 +281,7 @@ This is your headline. "I tuned backfill parameters on a cluster and can show th
 
 ### Steps
 1. Enable `ProctrackType=proctrack/cgroup`, `TaskPlugin=task/cgroup,task/affinity`. Configure `cgroup.conf` with `ConstrainCores`, `ConstrainRAMSpace`, `ConstrainDevices`.
-2. Run a job, find its cgroup under `/sys/fs/cgroup/`, and inspect the limits. Confirm cgroup v2 on Ubuntu 24.04 and note how it differs from v1 (Slurm's cgroup/v2 plugin).
+2. Run a job, find its cgroup under `/sys/fs/cgroup/`, and inspect the limits. Rocky 9 defaults to cgroup v2 — confirm with `stat -fc %T /sys/fs/cgroup/` (returns `cgroup2fs`) and note how it differs from v1 (Slurm's cgroup/v2 plugin).
 3. Prove isolation: request 1 CPU, run a 4-thread process, observe throttling. Request 200 MB, allocate 500 MB, watch the OOM kill.
 4. **Fake GPUs.** You have no GPUs, so simulate them: create dummy device files, declare `Gres=gpu:2` in `slurm.conf`, write `gres.conf` mapping names to files. Then submit with `--gres=gpu:1` and confirm `CUDA_VISIBLE_DEVICES` is set correctly and only the allocated device is visible.
 5. Read the real-hardware path even though you can't run it: `AutoDetect=nvml`, MPS, MIG, `--gpus-per-task` vs `--gpus-per-node` vs `--gres`. Know the syntax cold — it comes up constantly in AI-infra interviews.
@@ -278,7 +289,8 @@ This is your headline. "I tuned backfill parameters on a cluster and can show th
 7. Read `topology.conf` and tree topology. Understand why placing a multi-node job under one leaf switch matters for NCCL all-reduce performance.
 
 ### Problems you WILL hit
-- **cgroup v1 vs v2 mismatch.** Old docs assume v1. Ubuntu 24.04 is v2. Know which plugin you're on.
+- **cgroup v1 vs v2 mismatch.** Old docs assume v1 (RHEL 7/8 era). Rocky 9 is v2. Know which plugin you're on.
+- **SELinux blocks cgroup/device access** in some configurations. Diagnose with `ausearch -m avc -ts recent`, don't reflexively disable.
 - **`--mem` enforcement doesn't work** without `ConstrainRAMSpace=yes`.
 - **GRES declared but not allocatable.** `gres.conf` and `slurm.conf` disagree, or the count doesn't match device files. Read the slurmd log.
 - **`CUDA_VISIBLE_DEVICES` unset** — job asked for `--gres=gpu:1` but the GRES plugin isn't configured with device files, so no isolation happens.
@@ -504,6 +516,56 @@ Adjust `CPUs` and `RealMemory` to what `slurmd -C` reports on your instances, le
 **Users:** `sbatch` `srun` `salloc` `squeue` `scancel` `sacct` `sinfo` `sstat` `seff`
 **Admins:** `scontrol` `sacctmgr` `sdiag` `sprio` `sshare` `sreport` `sview` `slurmd -C` `slurmd -D -vvv`
 **The four you'll use most in interviews as evidence:** `sdiag`, `sprio -l`, `sshare -l`, `scontrol show node`
+
+---
+
+## Appendix C — RHEL-family cheat sheet (Rocky 9)
+
+We use Rocky because HPC runs on RHEL-family. Rocky is a source rebuild of RHEL —
+same packages, kernel, paths, behavior; no support contract. Everything you learn
+here transfers to RHEL and Alma unchanged.
+
+**Repos (do this first on every node):**
+```bash
+sudo dnf install -y epel-release
+sudo dnf config-manager --set-enabled crb    # CodeReady Builder
+```
+
+**Package name translation:**
+
+| Ubuntu | Rocky 9 |
+|---|---|
+| `build-essential` | `dnf groupinstall "Development Tools"` |
+| `libmunge-dev` | `munge-devel` |
+| `libmariadb-dev` | `mariadb-devel` |
+| `libpam0g-dev` | `pam-devel` |
+| `libjson-c-dev` | `json-c-devel` |
+| `libyaml-dev` | `libyaml-devel` |
+| `libjwt-dev` | `libjwt-devel` (EPEL) |
+| `nfs-kernel-server` | `nfs-utils` |
+
+**SELinux — learn it, don't disable it:**
+```bash
+getenforce                          # Enforcing by default
+ausearch -m avc -ts recent          # what got denied and why
+sealert -a /var/log/audit/audit.log # human-readable explanation
+setsebool -P use_nfs_home_dirs on   # common Slurm-related fix
+semanage fcontext -a -t <type> '<path>(/.*)?' && restorecon -Rv <path>
+```
+`setenforce 0` is the emergency lever, not the fix. Being able to read an AVC
+denial is a real, rare skill.
+
+**firewalld:**
+```bash
+firewall-cmd --list-all
+firewall-cmd --permanent --add-port=6817/tcp   # slurmctld
+firewall-cmd --permanent --add-port=6818/tcp   # slurmd
+firewall-cmd --permanent --add-port=6819/tcp   # slurmdbd
+firewall-cmd --reload
+```
+
+**Other differences:** `dnf` not `apt`; SSH user is `rocky`; `/etc/redhat-release`
+exists; systemd unit paths match Ubuntu; cgroup v2 by default on 9.
 
 ---
 
